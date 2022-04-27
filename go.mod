@@ -52,7 +52,7 @@ require (
 	github.com/nats-io/stan.go v0.10.2
 	github.com/oklog/ulid v1.3.1
 	github.com/pkg/errors v0.9.1
-	github.com/prometheus/client_golang v1.11.0
+	github.com/prometheus/client_golang v1.12.1
 	github.com/rakyll/statik v0.1.7
 	github.com/renstrom/shortuuid v3.0.0+incompatible
 	github.com/sirupsen/logrus v1.8.1
