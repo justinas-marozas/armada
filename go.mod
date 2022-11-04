@@ -27,7 +27,7 @@ require (
 	github.com/gogo/protobuf v1.3.2
 	github.com/golang/protobuf v1.5.2
 	github.com/gomodule/redigo v2.0.0+incompatible // indirect
-	github.com/google/go-cmp v0.5.6
+	github.com/google/go-cmp v0.5.9
 	github.com/google/uuid v1.1.2
 	github.com/gordonklaus/ineffassign v0.0.0-20210914165742-4cc7213b9bc8
 	github.com/grpc-ecosystem/go-grpc-middleware v1.3.0
@@ -46,10 +46,10 @@ require (
 	github.com/mitchellh/go-homedir v1.1.0
 	github.com/mitchellh/gox v0.4.0
 	github.com/mitchellh/mapstructure v1.4.3
-	github.com/nats-io/jsm.go v0.0.26
-	github.com/nats-io/nats-server/v2 v2.4.1-0.20210907200628-874c79fe411f
+	github.com/nats-io/jsm.go v0.0.35
+	github.com/nats-io/nats-server/v2 v2.9.6
 	github.com/nats-io/nats-streaming-server v0.22.1
-	github.com/nats-io/nats.go v1.13.0
+	github.com/nats-io/nats.go v1.19.0
 	github.com/nats-io/stan.go v0.10.2
 	github.com/oklog/ulid v1.3.1
 	github.com/pkg/errors v0.9.1
@@ -60,15 +60,15 @@ require (
 	github.com/spf13/cobra v1.3.0
 	github.com/spf13/pflag v1.0.5
 	github.com/spf13/viper v1.10.1
-	github.com/stretchr/testify v1.7.0
+	github.com/stretchr/testify v1.7.1
 	github.com/weaveworks/promrus v1.2.0
 	github.com/wlbr/templify v0.0.0-20210816202250-7b8044ca19e9
 	github.com/xeipuuv/gojsonpointer v0.0.0-20190905194746-02993c407bfb // indirect
 	github.com/xeipuuv/gojsonschema v1.2.0 // indirect
 	github.com/yuin/gopher-lua v0.0.0-20190514113301-1cd887cd7036 // indirect
-	golang.org/x/net v0.0.0-20220121210141-e204ce36a2ba
+	golang.org/x/net v0.1.0
 	golang.org/x/oauth2 v0.0.0-20211104180415-d3ed0bb246c8
-	golang.org/x/tools v0.1.8
+	golang.org/x/tools v0.1.12
 	google.golang.org/genproto v0.0.0-20211208223120-3a66f561d7aa
 	google.golang.org/grpc v1.43.0
 	gopkg.in/yaml.v2 v2.4.0
