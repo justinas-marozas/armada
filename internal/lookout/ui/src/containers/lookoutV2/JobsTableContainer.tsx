@@ -42,7 +42,7 @@ import { isJobGroupRow, JobRow, JobTableRow } from "models/jobsTableModels"
 import { Job, JobFilter, JobId, Match, SortDirection } from "models/lookoutV2Models"
 import { useLocation, useNavigate, useParams } from "react-router-dom"
 import { IGetJobsService } from "services/lookoutV2/GetJobsService"
-import { IGetRunErrorService } from "services/lookoutV2/GetRunErrorService"
+import { IGetRunInfoService } from "services/lookoutV2/GetRunInfoService"
 import { IGroupJobsService } from "services/lookoutV2/GroupJobsService"
 import { JobsTablePreferences, JobsTablePreferencesService } from "services/lookoutV2/JobsTablePreferencesService"
 import { UpdateJobsService } from "services/lookoutV2/UpdateJobsService"
@@ -71,7 +71,7 @@ import styles from "./JobsTableContainer.module.css"
 import { useCustomSnackbar } from "../../hooks/useCustomSnackbar"
 import { ICordonService } from "../../services/lookoutV2/CordonService"
 import { CustomViewsService } from "../../services/lookoutV2/CustomViewsService"
-import { IGetJobSpecService } from "../../services/lookoutV2/GetJobSpecService"
+import { IGetJobInfoService } from "../../services/lookoutV2/GetJobInfoService"
 import { ILogService } from "../../services/lookoutV2/LogService"
 import { getErrorMessage, waitMillis, CommandSpec } from "../../utils"
 import { EmptyInputError, ParseError } from "../../utils/resourceUtils"
@@ -82,8 +82,8 @@ interface JobsTableContainerProps {
   getJobsService: IGetJobsService
   groupJobsService: IGroupJobsService
   updateJobsService: UpdateJobsService
-  runErrorService: IGetRunErrorService
-  jobSpecService: IGetJobSpecService
+  runInfoService: IGetRunInfoService
+  jobSpecService: IGetJobInfoService
   logService: ILogService
   cordonService: ICordonService
   debug: boolean
@@ -127,7 +127,7 @@ export const JobsTableContainer = ({
   getJobsService,
   groupJobsService,
   updateJobsService,
-  runErrorService,
+  runInfoService,
   jobSpecService,
   logService,
   cordonService,
@@ -854,7 +854,7 @@ export const JobsTableContainer = ({
       {sidebarJobDetails !== undefined && (
         <Sidebar
           job={sidebarJobDetails}
-          runErrorService={runErrorService}
+          runInfoService={runInfoService}
           jobSpecService={jobSpecService}
           logService={logService}
           cordonService={cordonService}

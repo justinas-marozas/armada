@@ -12,10 +12,11 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 
-	"github.com/armadaproject/armada/internal/armada/configuration"
+	armadaconfiguration "github.com/armadaproject/armada/internal/armada/configuration"
 	"github.com/armadaproject/armada/internal/common/armadacontext"
 	armadaslices "github.com/armadaproject/armada/internal/common/slices"
 	"github.com/armadaproject/armada/internal/common/stringinterner"
+	"github.com/armadaproject/armada/internal/scheduler/configuration"
 	schedulerconstraints "github.com/armadaproject/armada/internal/scheduler/constraints"
 	schedulercontext "github.com/armadaproject/armada/internal/scheduler/context"
 	"github.com/armadaproject/armada/internal/scheduler/fairness"
@@ -343,7 +344,7 @@ func TestQueueScheduler(t *testing.T) {
 			),
 			Queues: testfixtures.SingleQueuePriorityOne("A"),
 			MinimumJobSize: map[string]resource.Quantity{
-				"gpu": resource.MustParse("1"),
+				"nvidia.com/gpu": resource.MustParse("1"),
 			},
 			ExpectedScheduledIndices: []int{2},
 		},
@@ -357,7 +358,7 @@ func TestQueueScheduler(t *testing.T) {
 			),
 			Queues: testfixtures.SingleQueuePriorityOne("A"),
 			MinimumJobSize: map[string]resource.Quantity{
-				"gpu": resource.MustParse("2"),
+				"nvidia.com/gpu": resource.MustParse("2"),
 			},
 			ExpectedScheduledIndices: nil,
 		},
@@ -419,16 +420,14 @@ func TestQueueScheduler(t *testing.T) {
 			Nodes:            testfixtures.N32CpuNodes(3, testfixtures.TestPriorities),
 			Jobs: armadaslices.Concatenate(
 				testfixtures.WithAnnotationsJobs(map[string]string{
-					configuration.GangIdAnnotation:                 "my-gang",
-					configuration.GangCardinalityAnnotation:        "2",
-					configuration.GangMinimumCardinalityAnnotation: "1",
+					armadaconfiguration.GangIdAnnotation:          "my-gang",
+					armadaconfiguration.GangCardinalityAnnotation: "2",
 				},
 					testfixtures.N32Cpu256GiJobs("A", testfixtures.PriorityClass0, 1)),
 				testfixtures.N1Cpu4GiJobs("A", testfixtures.PriorityClass0, 1),
 				testfixtures.WithAnnotationsJobs(map[string]string{
-					configuration.GangIdAnnotation:                 "my-gang",
-					configuration.GangCardinalityAnnotation:        "2",
-					configuration.GangMinimumCardinalityAnnotation: "1",
+					armadaconfiguration.GangIdAnnotation:          "my-gang",
+					armadaconfiguration.GangCardinalityAnnotation: "2",
 				},
 					testfixtures.N32Cpu256GiJobs("A", testfixtures.PriorityClass0, 1)),
 			),
@@ -447,16 +446,14 @@ func TestQueueScheduler(t *testing.T) {
 			Nodes:            testfixtures.N32CpuNodes(2, testfixtures.TestPriorities),
 			Jobs: armadaslices.Concatenate(
 				testfixtures.WithAnnotationsJobs(map[string]string{
-					configuration.GangIdAnnotation:                 "my-gang",
-					configuration.GangCardinalityAnnotation:        "2",
-					configuration.GangMinimumCardinalityAnnotation: "2",
+					armadaconfiguration.GangIdAnnotation:          "my-gang",
+					armadaconfiguration.GangCardinalityAnnotation: "2",
 				},
 					testfixtures.N32Cpu256GiJobs("A", testfixtures.PriorityClass0, 1)),
 				testfixtures.N1Cpu4GiJobs("A", testfixtures.PriorityClass0, 1),
 				testfixtures.WithAnnotationsJobs(map[string]string{
-					configuration.GangIdAnnotation:                 "my-gang",
-					configuration.GangCardinalityAnnotation:        "2",
-					configuration.GangMinimumCardinalityAnnotation: "2",
+					armadaconfiguration.GangIdAnnotation:          "my-gang",
+					armadaconfiguration.GangCardinalityAnnotation: "2",
 				},
 					testfixtures.N32Cpu256GiJobs("A", testfixtures.PriorityClass0, 1)),
 			),
@@ -572,6 +569,7 @@ func TestQueueScheduler(t *testing.T) {
 				err := sctx.AddQueueSchedulingContext(
 					q.Name, weight,
 					tc.InitialAllocatedByQueueAndPriorityClass[q.Name],
+					schedulerobjects.NewResourceList(0),
 					rate.NewLimiter(
 						rate.Limit(tc.SchedulingConfig.MaximumPerQueueSchedulingRate),
 						tc.SchedulingConfig.MaximumPerQueueSchedulingBurst,
@@ -728,7 +726,6 @@ func TestQueueScheduler(t *testing.T) {
 func NewNodeDb(config configuration.SchedulingConfig, stringInterner *stringinterner.StringInterner) (*nodedb.NodeDb, error) {
 	nodeDb, err := nodedb.NewNodeDb(
 		config.PriorityClasses,
-		config.MaxExtraNodesToConsider,
 		config.IndexedResources,
 		config.IndexedTaints,
 		config.IndexedNodeLabels,

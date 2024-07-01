@@ -17,8 +17,8 @@ import NavBar from "./components/NavBar"
 import JobSetsContainer from "./containers/JobSetsContainer"
 import { UserManagerContext, useUserManager } from "./oidc"
 import { ICordonService } from "./services/lookoutV2/CordonService"
-import { IGetJobSpecService } from "./services/lookoutV2/GetJobSpecService"
-import { IGetRunErrorService } from "./services/lookoutV2/GetRunErrorService"
+import { IGetJobInfoService } from "./services/lookoutV2/GetJobInfoService"
+import { IGetRunInfoService } from "./services/lookoutV2/GetRunInfoService"
 import { ILogService } from "./services/lookoutV2/LogService"
 import { CommandSpec } from "./utils"
 import { OidcConfig } from "./utils"
@@ -68,8 +68,8 @@ type AppProps = {
   oidcConfig?: OidcConfig
   v2GetJobsService: IGetJobsService
   v2GroupJobsService: IGroupJobsService
-  v2RunErrorService: IGetRunErrorService
-  v2JobSpecService: IGetJobSpecService
+  v2RunInfoService: IGetRunInfoService
+  v2JobSpecService: IGetJobInfoService
   v2LogService: ILogService
   v2UpdateJobsService: UpdateJobsService
   v2UpdateJobSetsService: UpdateJobSetsService
@@ -204,7 +204,7 @@ export function App(props: AppProps): JSX.Element {
                               getJobsService={props.v2GetJobsService}
                               groupJobsService={props.v2GroupJobsService}
                               updateJobsService={props.v2UpdateJobsService}
-                              runErrorService={props.v2RunErrorService}
+                              runInfoService={props.v2RunInfoService}
                               jobSpecService={props.v2JobSpecService}
                               logService={props.v2LogService}
                               cordonService={props.v2CordonService}

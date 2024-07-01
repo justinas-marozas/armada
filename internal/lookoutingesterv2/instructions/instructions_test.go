@@ -128,12 +128,25 @@ var expectedFailedRun = model.UpdateJobRunInstruction{
 	Finished:    &testfixtures.BaseTime,
 	JobRunState: pointer.Int32(lookout.JobRunFailedOrdinal),
 	Error:       []byte(testfixtures.ErrMsg),
+	Debug:       []byte(testfixtures.DebugMsg),
 	ExitCode:    pointer.Int32(testfixtures.ExitCode),
 }
 
 var expectedUnschedulable = model.UpdateJobRunInstruction{
 	RunId: testfixtures.RunIdString,
 	Node:  pointer.String(testfixtures.NodeName),
+}
+
+var expectedRejected = model.UpdateJobInstruction{
+	JobId:                     testfixtures.JobIdString,
+	State:                     pointer.Int32(lookout.JobRejectedOrdinal),
+	LastTransitionTime:        &testfixtures.BaseTime,
+	LastTransitionTimeSeconds: pointer.Int64(testfixtures.BaseTime.Unix()),
+}
+
+var expectedRejectedJobError = model.CreateJobErrorInstruction{
+	JobId: testfixtures.JobIdString,
+	Error: []byte(testfixtures.ErrMsg),
 }
 
 var expectedPreempted = model.UpdateJobInstruction{
@@ -201,23 +214,6 @@ func TestConvert(t *testing.T) {
 		},
 	}
 
-	expectedCreateUserAnnotations := []*model.CreateUserAnnotationInstruction{
-		{
-			JobId:  testfixtures.JobIdString,
-			Key:    "a",
-			Value:  "0",
-			Queue:  testfixtures.Queue,
-			Jobset: testfixtures.JobSetName,
-		},
-		{
-			JobId:  testfixtures.JobIdString,
-			Key:    "b",
-			Value:  "1",
-			Queue:  testfixtures.Queue,
-			Jobset: testfixtures.JobSetName,
-		},
-	}
-
 	cancelledWithReason, err := testfixtures.DeepCopy(testfixtures.JobCancelled)
 	assert.NoError(t, err)
 	cancelledWithReason.GetCancelledJob().Reason = "some reason"
@@ -234,9 +230,8 @@ func TestConvert(t *testing.T) {
 				},
 			},
 			expected: &model.InstructionSet{
-				JobsToCreate:            []*model.CreateJobInstruction{expectedSubmit},
-				UserAnnotationsToCreate: expectedCreateUserAnnotations,
-				MessageIds:              []pulsar.MessageID{pulsarutils.NewMessageId(1)},
+				JobsToCreate: []*model.CreateJobInstruction{expectedSubmit},
+				MessageIds:   []pulsar.MessageID{pulsarutils.NewMessageId(1)},
 			},
 		},
 		"happy path single update": {
@@ -252,12 +247,11 @@ func TestConvert(t *testing.T) {
 				MessageIds: []pulsar.MessageID{pulsarutils.NewMessageId(1)},
 			},
 			expected: &model.InstructionSet{
-				JobsToCreate:            []*model.CreateJobInstruction{expectedSubmit},
-				JobsToUpdate:            []*model.UpdateJobInstruction{&expectedLeased, &expectedPending, &expectedRunning, &expectedJobSucceeded},
-				JobRunsToCreate:         []*model.CreateJobRunInstruction{&expectedLeasedRun},
-				JobRunsToUpdate:         []*model.UpdateJobRunInstruction{&expectedPendingRun, &expectedRunningRun, &expectedJobRunSucceeded},
-				UserAnnotationsToCreate: expectedCreateUserAnnotations,
-				MessageIds:              []pulsar.MessageID{pulsarutils.NewMessageId(1)},
+				JobsToCreate:    []*model.CreateJobInstruction{expectedSubmit},
+				JobsToUpdate:    []*model.UpdateJobInstruction{&expectedLeased, &expectedPending, &expectedRunning, &expectedJobSucceeded},
+				JobRunsToCreate: []*model.CreateJobRunInstruction{&expectedLeasedRun},
+				JobRunsToUpdate: []*model.UpdateJobRunInstruction{&expectedPendingRun, &expectedRunningRun, &expectedJobRunSucceeded},
+				MessageIds:      []pulsar.MessageID{pulsarutils.NewMessageId(1)},
 			},
 		},
 		"happy path multi update": {
@@ -279,11 +273,10 @@ func TestConvert(t *testing.T) {
 				},
 			},
 			expected: &model.InstructionSet{
-				JobsToCreate:            []*model.CreateJobInstruction{expectedSubmit},
-				JobsToUpdate:            []*model.UpdateJobInstruction{&expectedLeased, &expectedPending, &expectedRunning, &expectedJobSucceeded},
-				JobRunsToCreate:         []*model.CreateJobRunInstruction{&expectedLeasedRun},
-				JobRunsToUpdate:         []*model.UpdateJobRunInstruction{&expectedPendingRun, &expectedRunningRun, &expectedJobRunSucceeded},
-				UserAnnotationsToCreate: expectedCreateUserAnnotations,
+				JobsToCreate:    []*model.CreateJobInstruction{expectedSubmit},
+				JobsToUpdate:    []*model.UpdateJobInstruction{&expectedLeased, &expectedPending, &expectedRunning, &expectedJobSucceeded},
+				JobRunsToCreate: []*model.CreateJobRunInstruction{&expectedLeasedRun},
+				JobRunsToUpdate: []*model.UpdateJobRunInstruction{&expectedPendingRun, &expectedRunningRun, &expectedJobRunSucceeded},
 				MessageIds: []pulsar.MessageID{
 					pulsarutils.NewMessageId(1),
 					pulsarutils.NewMessageId(2),
@@ -389,13 +382,15 @@ func TestConvert(t *testing.T) {
 				MessageIds:      []pulsar.MessageID{pulsarutils.NewMessageId(1)},
 			},
 		},
-		"duplicate submit is ignored": {
+		"job rejected": {
 			events: &ingest.EventSequencesWithIds{
-				EventSequences: []*armadaevents.EventSequence{testfixtures.NewEventSequence(testfixtures.SubmitDuplicate)},
+				EventSequences: []*armadaevents.EventSequence{testfixtures.NewEventSequence(testfixtures.JobRejected)},
 				MessageIds:     []pulsar.MessageID{pulsarutils.NewMessageId(1)},
 			},
 			expected: &model.InstructionSet{
-				MessageIds: []pulsar.MessageID{pulsarutils.NewMessageId(1)},
+				JobsToUpdate:      []*model.UpdateJobInstruction{&expectedRejected},
+				JobErrorsToCreate: []*model.CreateJobErrorInstruction{&expectedRejectedJobError},
+				MessageIds:        []pulsar.MessageID{pulsarutils.NewMessageId(1)},
 			},
 		},
 		"job preempted": {
@@ -435,8 +430,7 @@ func TestConvert(t *testing.T) {
 				},
 			},
 			expected: &model.InstructionSet{
-				JobsToCreate:            []*model.CreateJobInstruction{expectedSubmit},
-				UserAnnotationsToCreate: expectedCreateUserAnnotations,
+				JobsToCreate: []*model.CreateJobInstruction{expectedSubmit},
 				MessageIds: []pulsar.MessageID{
 					pulsarutils.NewMessageId(1),
 					pulsarutils.NewMessageId(2),
@@ -472,8 +466,7 @@ func TestConvert(t *testing.T) {
 				},
 			},
 			expected: &model.InstructionSet{
-				JobsToCreate:            []*model.CreateJobInstruction{expectedSubmit},
-				UserAnnotationsToCreate: expectedCreateUserAnnotations,
+				JobsToCreate: []*model.CreateJobInstruction{expectedSubmit},
 				MessageIds: []pulsar.MessageID{
 					pulsarutils.NewMessageId(1),
 					pulsarutils.NewMessageId(2),
@@ -510,7 +503,6 @@ func TestConvert(t *testing.T) {
 			assert.Equal(t, tc.expected.JobsToUpdate, instructionSet.JobsToUpdate)
 			assert.Equal(t, tc.expected.JobRunsToCreate, instructionSet.JobRunsToCreate)
 			assert.Equal(t, tc.expected.JobRunsToUpdate, instructionSet.JobRunsToUpdate)
-			assert.Equal(t, tc.expected.UserAnnotationsToCreate, instructionSet.UserAnnotationsToCreate)
 			assert.Equal(t, tc.expected.MessageIds, instructionSet.MessageIds)
 		})
 	}

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	protoutil "github.com/armadaproject/armada/internal/common/proto"
 	armadaresource "github.com/armadaproject/armada/internal/common/resource"
 	"github.com/armadaproject/armada/pkg/api"
 )
@@ -166,15 +167,16 @@ func (context *WatchContext) AreJobsFinished(ids []string) bool {
 }
 
 func updateJobInfo(info *JobInfo, event api.Event) {
+	eventTs := protoutil.ToStdTime(event.GetCreated())
 	if isLifeCycleEvent(event) && !isPodEvent(event) {
-		if info.LastUpdate.After(event.GetCreated()) {
+		if info.LastUpdate.After(eventTs) {
 			if submitEvent, ok := event.(*api.JobSubmittedEvent); ok {
 				info.Job = &submitEvent.Job
 			}
 			// skipping event as it is out of time order
 			return
 		}
-		info.LastUpdate = event.GetCreated()
+		info.LastUpdate = eventTs
 	}
 
 	switch typed := event.(type) {
@@ -185,8 +187,6 @@ func updateJobInfo(info *JobInfo, event api.Event) {
 			info.PodStatus = append(info.PodStatus, Submitted)
 			info.PodLastUpdated = append(info.PodLastUpdated, time.Time{})
 		}
-	case *api.JobDuplicateFoundEvent:
-		info.Status = Duplicate
 	case *api.JobQueuedEvent:
 		info.Status = Queued
 	case *api.JobLeasedEvent:
@@ -223,8 +223,6 @@ func updateJobInfo(info *JobInfo, event api.Event) {
 		// NOOP
 	case *api.JobUtilisationEvent:
 		info.MaxUsedResources.Max(typed.MaxResourcesForPeriod)
-	case *api.JobUpdatedEvent:
-		info.Job = &typed.Job
 	}
 }
 
@@ -238,16 +236,17 @@ func resetPodStatus(info *JobInfo) {
 func updatePodStatus(info *JobInfo, event api.KubernetesEvent, status PodStatus) {
 	info.ClusterId = event.GetClusterId()
 	podNumber := event.GetPodNumber()
+	eventTs := protoutil.ToStdTime(event.GetCreated())
 
 	for len(info.PodStatus) <= int(podNumber) {
 		info.PodStatus = append(info.PodStatus, Submitted)
 		info.PodLastUpdated = append(info.PodLastUpdated, time.Time{})
 	}
-	if info.PodLastUpdated[podNumber].After(event.GetCreated()) {
+	if info.PodLastUpdated[podNumber].After(eventTs) {
 		// skipping event as it is out of time order
 		return
 	}
-	info.PodLastUpdated[podNumber] = event.GetCreated()
+	info.PodLastUpdated[podNumber] = eventTs
 	info.PodStatus[podNumber] = status
 
 	//if info.Status == Cancelled {
@@ -286,8 +285,6 @@ func isLifeCycleEvent(event api.Event) bool {
 	case *api.JobSubmittedEvent:
 		return true
 	case *api.JobQueuedEvent:
-		return true
-	case *api.JobDuplicateFoundEvent:
 		return true
 	case *api.JobLeasedEvent:
 		return true

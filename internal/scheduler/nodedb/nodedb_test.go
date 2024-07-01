@@ -69,13 +69,11 @@ func TestSelectNodeForPod_NodeIdLabel_Success(t *testing.T) {
 	require.NotEmpty(t, nodeId)
 	db, err := newNodeDbWithNodes(nodes)
 	require.NoError(t, err)
-	jobs := testfixtures.WithNodeSelectorJobs(
-		map[string]string{schedulerconfig.NodeIdLabel: nodeId},
-		testfixtures.N1Cpu4GiJobs("A", testfixtures.PriorityClass0, 1),
-	)
+	jobs := testfixtures.N1Cpu4GiJobs("A", testfixtures.PriorityClass0, 1)
 	jctxs := schedulercontext.JobSchedulingContextsFromJobs(testfixtures.TestPriorityClasses, jobs)
 	for _, jctx := range jctxs {
 		txn := db.Txn(false)
+		jctx.SetAssignedNodeId(nodeId)
 		node, err := db.SelectNodeForJobWithTxn(txn, jctx)
 		txn.Abort()
 		require.NoError(t, err)
@@ -96,13 +94,11 @@ func TestSelectNodeForPod_NodeIdLabel_Failure(t *testing.T) {
 	require.NotEmpty(t, nodeId)
 	db, err := newNodeDbWithNodes(nodes)
 	require.NoError(t, err)
-	jobs := testfixtures.WithNodeSelectorJobs(
-		map[string]string{schedulerconfig.NodeIdLabel: "this node does not exist"},
-		testfixtures.N1Cpu4GiJobs("A", testfixtures.PriorityClass0, 1),
-	)
+	jobs := testfixtures.N1Cpu4GiJobs("A", testfixtures.PriorityClass0, 1)
 	jctxs := schedulercontext.JobSchedulingContextsFromJobs(testfixtures.TestPriorityClasses, jobs)
 	for _, jctx := range jctxs {
 		txn := db.Txn(false)
+		jctx.SetAssignedNodeId("non-existent node")
 		node, err := db.SelectNodeForJobWithTxn(txn, jctx)
 		txn.Abort()
 		if !assert.NoError(t, err) {
@@ -126,7 +122,10 @@ func TestNodeBindingEvictionUnbinding(t *testing.T) {
 
 	jobFilter := func(job *jobdb.Job) bool { return true }
 	job := testfixtures.Test1GpuJob("A", testfixtures.PriorityClass0)
-	request := schedulerobjects.ResourceListFromV1ResourceList(job.ResourceRequirements().Requests)
+	request := job.EfficientResourceRequirements()
+	requestInternalRl, err := nodeDb.resourceListFactory.FromJobResourceListFailOnUnknown(job.ResourceRequirements().Requests)
+	assert.Nil(t, err)
+
 	jobId := job.Id()
 
 	boundNode, err := nodeDb.bindJobToNode(entry, job, job.PodRequirements().Priority)
@@ -169,14 +168,14 @@ func TestNodeBindingEvictionUnbinding(t *testing.T) {
 	assert.True(
 		t,
 		armadamaps.DeepEqual(
-			map[string]schedulerobjects.ResourceList{jobId: request},
+			map[string]internaltypes.ResourceList{jobId: requestInternalRl},
 			boundNode.AllocatedByJobId,
 		),
 	)
 	assert.True(
 		t,
 		armadamaps.DeepEqual(
-			map[string]schedulerobjects.ResourceList{jobId: request},
+			map[string]internaltypes.ResourceList{jobId: requestInternalRl},
 			evictedNode.AllocatedByJobId,
 		),
 	)
@@ -184,20 +183,20 @@ func TestNodeBindingEvictionUnbinding(t *testing.T) {
 	assert.True(
 		t,
 		armadamaps.DeepEqual(
-			map[string]schedulerobjects.ResourceList{"A": request},
+			map[string]internaltypes.ResourceList{"A": request},
 			boundNode.AllocatedByQueue,
 		),
 	)
 	assert.True(
 		t,
 		armadamaps.DeepEqual(
-			map[string]schedulerobjects.ResourceList{"A": request},
+			map[string]internaltypes.ResourceList{"A": request},
 			evictedNode.AllocatedByQueue,
 		),
 	)
 
-	expectedAllocatable := boundNode.TotalResources.DeepCopy()
-	expectedAllocatable.Sub(request)
+	expectedAllocatable := boundNode.TotalResources
+	expectedAllocatable = expectedAllocatable.Subtract(request)
 	priority := testfixtures.TestPriorityClasses[job.PriorityClassName()].Priority
 	assert.True(t, expectedAllocatable.Equal(boundNode.AllocatableByPriority[priority]))
 
@@ -207,11 +206,9 @@ func TestNodeBindingEvictionUnbinding(t *testing.T) {
 }
 
 func assertNodeAccountingEqual(t *testing.T, node1, node2 *internaltypes.Node) {
-	allocatable1 := schedulerobjects.QuantityByTAndResourceType[int32](node1.AllocatableByPriority)
-	allocatable2 := schedulerobjects.QuantityByTAndResourceType[int32](node2.AllocatableByPriority)
 	assert.True(
 		t,
-		allocatable1.Equal(allocatable2),
+		armadamaps.DeepEqual(node1.AllocatableByPriority, node2.AllocatableByPriority),
 		"expected %v, but got %v",
 		node1.AllocatableByPriority,
 		node2.AllocatableByPriority,
@@ -336,7 +333,7 @@ func TestScheduleIndividually(t *testing.T) {
 				},
 				testfixtures.N1Cpu4GiJobs("A", testfixtures.PriorityClass0, 1),
 			),
-			ExpectSuccess: testfixtures.Repeat(false, 1),
+			ExpectSuccess: testfixtures.Repeat(true, 1), // we ignore unknown resource types on jobs, should never happen in practice anyway as these should fail earlier.
 		},
 		"preemption": {
 			Nodes: testfixtures.N32CpuNodes(1, testfixtures.TestPriorities),
@@ -464,7 +461,7 @@ func TestScheduleIndividually(t *testing.T) {
 				node, err := nodeDb.GetNode(nodeId)
 				require.NoError(t, err)
 				require.NotNil(t, node)
-				expected := schedulerobjects.ResourceListFromV1ResourceList(job.ResourceRequirements().Requests)
+				expected := job.EfficientResourceRequirements()
 				actual, ok := node.AllocatedByJobId[job.Id()]
 				require.True(t, ok)
 				assert.True(t, actual.Equal(expected))
@@ -486,19 +483,13 @@ func TestScheduleMany(t *testing.T) {
 		// For each group, whether we expect scheduling to succeed.
 		ExpectSuccess []bool
 	}{
-		// Attempts to schedule 32 jobs with a minimum gang cardinality of 1 job. All jobs get scheduled.
+		// Attempts to schedule 32. All jobs get scheduled.
 		"simple success": {
 			Nodes:         testfixtures.N32CpuNodes(1, testfixtures.TestPriorities),
 			Jobs:          [][]*jobdb.Job{gangSuccess},
 			ExpectSuccess: []bool{true},
 		},
-		// Attempts to schedule 33 jobs with a minimum gang cardinality of 32 jobs. One fails, but the overall result is a success.
-		"simple success with min cardinality": {
-			Nodes:         testfixtures.N32CpuNodes(1, testfixtures.TestPriorities),
-			Jobs:          [][]*jobdb.Job{testfixtures.WithGangAnnotationsAndMinCardinalityJobs(32, testfixtures.N1Cpu4GiJobs("A", testfixtures.PriorityClass0, 33))},
-			ExpectSuccess: []bool{true},
-		},
-		// Attempts to schedule 33 jobs with a minimum gang cardinality of 33. The overall result fails.
+		// Attempts to schedule 33 jobs. The overall result fails.
 		"simple failure with min cardinality": {
 			Nodes:         testfixtures.N32CpuNodes(1, testfixtures.TestPriorities),
 			Jobs:          [][]*jobdb.Job{gangFailure},
@@ -549,9 +540,7 @@ func TestScheduleMany(t *testing.T) {
 				for _, jctx := range jctxs {
 					pctx := jctx.PodSchedulingContext
 					require.NotNil(t, pctx)
-					if !jctx.ShouldFail {
-						assert.NotEqual(t, "", pctx.NodeId)
-					}
+					assert.NotEqual(t, "", pctx.NodeId)
 				}
 			}
 		})
@@ -561,7 +550,6 @@ func TestScheduleMany(t *testing.T) {
 func TestAwayNodeTypes(t *testing.T) {
 	nodeDb, err := NewNodeDb(
 		testfixtures.TestPriorityClasses,
-		testfixtures.TestMaxExtraNodesToConsider,
 		testfixtures.TestResources,
 		testfixtures.TestIndexedTaints,
 		testfixtures.TestIndexedNodeLabels,
@@ -610,10 +598,125 @@ func TestAwayNodeTypes(t *testing.T) {
 	)
 }
 
+func TestMakeIndexedResourceResolution(t *testing.T) {
+	supportedResources := []schedulerconfig.ResourceType{
+		{
+			Name:       "unit-resource-1",
+			Resolution: resource.MustParse("1"),
+		},
+		{
+			Name:       "unit-resource-2",
+			Resolution: resource.MustParse("1"),
+		},
+		{
+			Name:       "un-indexed-resource",
+			Resolution: resource.MustParse("1"),
+		},
+		{
+			Name:       "milli-resource-1",
+			Resolution: resource.MustParse("1m"),
+		},
+		{
+			Name:       "milli-resource-2",
+			Resolution: resource.MustParse("1m"),
+		},
+	}
+
+	indexedResources := []schedulerconfig.ResourceType{
+		{
+			Name:       "unit-resource-1",
+			Resolution: resource.MustParse("1"),
+		},
+		{
+			Name:       "unit-resource-2",
+			Resolution: resource.MustParse("100"),
+		},
+		{
+			Name:       "milli-resource-1",
+			Resolution: resource.MustParse("1m"),
+		},
+		{
+			Name:       "milli-resource-2",
+			Resolution: resource.MustParse("1"),
+		},
+	}
+
+	resourceListFactory, err := internaltypes.MakeResourceListFactory(supportedResources)
+	assert.Nil(t, err)
+	assert.NotNil(t, resourceListFactory)
+
+	result, err := makeIndexedResourceResolution(indexedResources, resourceListFactory)
+	assert.Nil(t, err)
+	assert.Equal(t, []int64{1, 100, 1, 1000}, result)
+}
+
+func TestMakeIndexedResourceResolution_ErrorsOnUnsupportedResource(t *testing.T) {
+	supportedResources := []schedulerconfig.ResourceType{
+		{
+			Name:       "a-resource",
+			Resolution: resource.MustParse("1"),
+		},
+	}
+
+	indexedResources := []schedulerconfig.ResourceType{
+		{
+			Name:       "non-supported-resource",
+			Resolution: resource.MustParse("1"),
+		},
+	}
+
+	resourceListFactory, err := internaltypes.MakeResourceListFactory(supportedResources)
+	assert.Nil(t, err)
+	assert.NotNil(t, resourceListFactory)
+
+	result, err := makeIndexedResourceResolution(indexedResources, resourceListFactory)
+	assert.NotNil(t, err)
+	assert.Nil(t, result)
+}
+
+func TestMakeIndexedResourceResolution_ErrorsOnInvalidResolution(t *testing.T) {
+	supportedResources := []schedulerconfig.ResourceType{
+		{
+			Name:       "a-resource",
+			Resolution: resource.MustParse("1"),
+		},
+	}
+
+	resourceListFactory, err := internaltypes.MakeResourceListFactory(supportedResources)
+	assert.Nil(t, err)
+	assert.NotNil(t, resourceListFactory)
+
+	result, err := makeIndexedResourceResolution([]schedulerconfig.ResourceType{
+		{
+			Name:       "a-resource",
+			Resolution: resource.MustParse("0"),
+		},
+	}, resourceListFactory)
+	assert.NotNil(t, err)
+	assert.Nil(t, result)
+
+	result, err = makeIndexedResourceResolution([]schedulerconfig.ResourceType{
+		{
+			Name:       "a-resource",
+			Resolution: resource.MustParse("-1"),
+		},
+	}, resourceListFactory)
+	assert.NotNil(t, err)
+	assert.Nil(t, result)
+
+	result, err = makeIndexedResourceResolution([]schedulerconfig.ResourceType{
+		{
+			Name:       "a-resource",
+			Resolution: resource.MustParse("0.1"), // this cannot be less than the supported resource type resolution, should error
+		},
+	}, resourceListFactory)
+	assert.NotNil(t, err)
+	assert.Nil(t, result)
+}
+
 func benchmarkUpsert(nodes []*schedulerobjects.Node, b *testing.B) {
 	nodeDb, err := NewNodeDb(
 		testfixtures.TestPriorityClasses,
-		testfixtures.TestMaxExtraNodesToConsider,
 		testfixtures.TestResources,
 		testfixtures.TestIndexedTaints,
 		testfixtures.TestIndexedNodeLabels,
@@ -654,7 +757,6 @@ func BenchmarkUpsert100000(b *testing.B) {
 func benchmarkScheduleMany(b *testing.B, nodes []*schedulerobjects.Node, jobs []*jobdb.Job) {
 	nodeDb, err := NewNodeDb(
 		testfixtures.TestPriorityClasses,
-		testfixtures.TestMaxExtraNodesToConsider,
 		testfixtures.TestResources,
 		testfixtures.TestIndexedTaints,
 		testfixtures.TestIndexedNodeLabels,
@@ -781,7 +883,6 @@ func BenchmarkScheduleManyResourceConstrained(b *testing.B) {
 func newNodeDbWithNodes(nodes []*schedulerobjects.Node) (*NodeDb, error) {
 	nodeDb, err := NewNodeDb(
 		testfixtures.TestPriorityClasses,
-		testfixtures.TestMaxExtraNodesToConsider,
 		testfixtures.TestResources,
 		testfixtures.TestIndexedTaints,
 		testfixtures.TestIndexedNodeLabels,

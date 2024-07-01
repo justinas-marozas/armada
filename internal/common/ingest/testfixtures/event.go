@@ -71,6 +71,7 @@ const (
 	PodNumber                  = 6
 	ExitCode                   = 322
 	ErrMsg                     = "sample error message"
+	DebugMsg                   = "sample debug message"
 	LeaseReturnedMsg           = "lease returned error message"
 	TerminatedMsg              = "test pod terminated message"
 	UnschedulableMsg           = "test pod is unschedulable"
@@ -314,6 +315,16 @@ var JobCancelled = &armadaevents.EventSequence_Event{
 	},
 }
 
+var JobValidated = &armadaevents.EventSequence_Event{
+	Created: &testfixtures.BaseTime,
+	Event: &armadaevents.EventSequence_Event_JobValidated{
+		JobValidated: &armadaevents.JobValidated{
+			JobId: JobIdProto,
+			Pools: []string{"cpu"},
+		},
+	},
+}
+
 var JobRequeued = &armadaevents.EventSequence_Event{
 	Created: &BaseTime,
 	Event: &armadaevents.EventSequence_Event_JobRequeued{
@@ -423,8 +434,9 @@ var JobRunFailed = &armadaevents.EventSequence_Event{
 					Terminal: true,
 					Reason: &armadaevents.Error_PodError{
 						PodError: &armadaevents.PodError{
-							Message:  ErrMsg,
-							NodeName: NodeName,
+							Message:      ErrMsg,
+							DebugMessage: DebugMsg,
+							NodeName:     NodeName,
 							ContainerErrors: []*armadaevents.ContainerError{
 								{ExitCode: ExitCode},
 							},
@@ -501,6 +513,25 @@ var JobPreempted = &armadaevents.EventSequence_Event{
 	},
 }
 
+var JobRejected = &armadaevents.EventSequence_Event{
+	Created: &testfixtures.BaseTime,
+	Event: &armadaevents.EventSequence_Event_JobErrors{
+		JobErrors: &armadaevents.JobErrors{
+			JobId: JobIdProto,
+			Errors: []*armadaevents.Error{
+				{
+					Terminal: true,
+					Reason: &armadaevents.Error_JobRejected{
+						JobRejected: &armadaevents.JobRejected{
+							Message: ErrMsg,
+						},
+					},
+				},
+			},
+		},
+	},
+}
+
 var JobFailed = &armadaevents.EventSequence_Event{
 	Created: &testfixtures.BaseTime,
 	Event: &armadaevents.EventSequence_Event_JobErrors{
@@ -538,7 +569,8 @@ var JobLeaseReturned = &armadaevents.EventSequence_Event{
 							ObjectMeta: &armadaevents.ObjectMeta{
 								ExecutorId: ExecutorId,
 							},
-							Message: LeaseReturnedMsg,
+							Message:      LeaseReturnedMsg,
+							DebugMessage: DebugMsg,
 						},
 					},
 				},

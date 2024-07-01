@@ -25,7 +25,7 @@ var jobSchedulingInfo = &schedulerobjects.JobSchedulingInfo{
 	},
 }
 
-var baseJob = jobDb.NewJob(
+var baseJob, _ = jobDb.NewJob(
 	"test-job",
 	"test-jobSet",
 	"test-queue",
@@ -37,6 +37,8 @@ var baseJob = jobDb.NewJob(
 	false,
 	false,
 	3,
+	false,
+	[]string{},
 )
 
 var baseRun = &JobRun{
@@ -307,9 +309,11 @@ func TestJob_TestWithCreated(t *testing.T) {
 }
 
 func TestJob_DeepCopy(t *testing.T) {
-	original := jobDb.NewJob("test-job", "test-jobSet", "test-queue", 2, jobSchedulingInfo, true, 0, false, false, false, 3)
+	original, err := jobDb.NewJob("test-job", "test-jobSet", "test-queue", 2, jobSchedulingInfo, true, 0, false, false, false, 3, false, []string{})
+	assert.Nil(t, err)
 	original = original.WithUpdatedRun(baseJobRun.DeepCopy())
-	expected := jobDb.NewJob("test-job", "test-jobSet", "test-queue", 2, jobSchedulingInfo, true, 0, false, false, false, 3)
+	expected, err := jobDb.NewJob("test-job", "test-jobSet", "test-queue", 2, jobSchedulingInfo, true, 0, false, false, false, 3, false, []string{})
+	assert.Nil(t, err)
 	expected = expected.WithUpdatedRun(baseJobRun.DeepCopy())
 
 	result := original.DeepCopy()
@@ -340,7 +344,7 @@ func TestJob_TestWithJobSchedulingInfo(t *testing.T) {
 			},
 		},
 	}
-	newJob := baseJob.WithJobSchedulingInfo(newSchedInfo)
+	newJob := JobWithJobSchedulingInfo(baseJob, newSchedInfo)
 	assert.Equal(t, jobSchedulingInfo, baseJob.JobSchedulingInfo())
 	assert.Equal(t, newSchedInfo, newJob.JobSchedulingInfo())
 }
@@ -361,13 +365,14 @@ func TestJobSchedulingInfoFieldsInitialised(t *testing.T) {
 	assert.Nil(t, infoWithNilFields.GetPodRequirements().NodeSelector)
 	assert.Nil(t, infoWithNilFields.GetPodRequirements().Annotations)
 
-	job := jobDb.NewJob("test-job", "test-jobSet", "test-queue", 2, infoWithNilFieldsCopy, true, 0, false, false, false, 3)
+	job, err := jobDb.NewJob("test-job", "test-jobSet", "test-queue", 2, infoWithNilFieldsCopy, true, 0, false, false, false, 3, false, []string{})
+	assert.Nil(t, err)
 	assert.NotNil(t, job.NodeSelector())
 	assert.NotNil(t, job.Annotations())
 
 	// Copy again here, as the fields get mutated so we want a clean copy
 	infoWithNilFieldsCopy2 := proto.Clone(infoWithNilFields).(*schedulerobjects.JobSchedulingInfo)
-	updatedJob := baseJob.WithJobSchedulingInfo(infoWithNilFieldsCopy2)
+	updatedJob := JobWithJobSchedulingInfo(baseJob, infoWithNilFieldsCopy2)
 	assert.NotNil(t, updatedJob.NodeSelector())
 	assert.NotNil(t, updatedJob.Annotations())
 }

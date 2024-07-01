@@ -10,12 +10,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/exp/slices"
-	"k8s.io/apimachinery/pkg/util/clock"
+	clock "k8s.io/utils/clock/testing"
 
-	"github.com/armadaproject/armada/internal/armada/configuration"
 	"github.com/armadaproject/armada/internal/common/armadacontext"
 	armadaslices "github.com/armadaproject/armada/internal/common/slices"
 	"github.com/armadaproject/armada/internal/common/stringinterner"
+	"github.com/armadaproject/armada/internal/scheduler/configuration"
 	"github.com/armadaproject/armada/internal/scheduler/jobdb"
 	schedulermocks "github.com/armadaproject/armada/internal/scheduler/mocks"
 	"github.com/armadaproject/armada/internal/scheduler/nodedb"
@@ -48,9 +48,6 @@ func TestSchedule(t *testing.T) {
 
 		// Indices of queued jobs expected to be scheduled.
 		expectedScheduledIndices []int
-
-		// Count of jobs expected to fail
-		expectedFailedJobCount int
 	}{
 		"scheduling": {
 			schedulingConfig: testfixtures.TestSchedulingConfig(),
@@ -300,17 +297,6 @@ func TestSchedule(t *testing.T) {
 			queuedJobs:               testfixtures.WithGangAnnotationsJobs(testfixtures.N16Cpu128GiJobs("A", testfixtures.PriorityClass0, 2)),
 			expectedScheduledIndices: []int{0, 1},
 		},
-		"gang scheduling successful with some jobs failing to schedule above min cardinality": {
-			schedulingConfig: testfixtures.TestSchedulingConfig(),
-			executors:        []*schedulerobjects.Executor{testfixtures.Test1Node32CoreExecutor("executor1")},
-			queues:           []*api.Queue{{Name: "A", PriorityFactor: 0.01}},
-			queuedJobs: testfixtures.WithGangAnnotationsAndMinCardinalityJobs(
-				2,
-				testfixtures.N16Cpu128GiJobs("A", testfixtures.PriorityClass0, 10),
-			),
-			expectedScheduledIndices: []int{0, 1},
-			expectedFailedJobCount:   8,
-		},
 		"not scheduling a gang that does not fit on any executor": {
 			schedulingConfig: testfixtures.TestSchedulingConfig(),
 			executors: []*schedulerobjects.Executor{
@@ -432,7 +418,7 @@ func TestSchedule(t *testing.T) {
 			}
 
 			// Setup jobDb.
-			jobDb := testfixtures.NewJobDb()
+			jobDb := testfixtures.NewJobDb(testfixtures.TestResourceListFactory)
 			txn := jobDb.WriteTxn()
 			err = txn.Upsert(jobsToUpsert)
 			require.NoError(t, err)
@@ -478,14 +464,6 @@ func TestSchedule(t *testing.T) {
 			} else {
 				assert.Equal(t, tc.expectedScheduledIndices, actualScheduledIndices)
 			}
-			// Sanity check: we've set `GangNumJobsScheduledAnnotation` for all scheduled jobs.
-			for _, job := range scheduledJobs {
-				assert.Contains(t, schedulerResult.AdditionalAnnotationsByJobId[job.Id()], configuration.GangNumJobsScheduledAnnotation)
-			}
-
-			// Check that we failed the correct number of excess jobs when a gang schedules >= minimum cardinality
-			failedJobs := FailedJobsFromSchedulerResult(schedulerResult)
-			assert.Equal(t, tc.expectedFailedJobCount, len(failedJobs))
 
 			// Check that preempted jobs are marked as such consistently.
 			for _, job := range preemptedJobs {
@@ -505,13 +483,6 @@ func TestSchedule(t *testing.T) {
 				assert.NotEmpty(t, dbRun.NodeName())
 			}
 
-			// Check that failed jobs are marked as such consistently.
-			for _, job := range failedJobs {
-				dbJob := txn.GetById(job.Id())
-				assert.True(t, dbJob.Failed())
-				assert.False(t, dbJob.Queued())
-			}
-
 			// Check that jobDb was updated correctly.
 			// TODO: Check that there are no unexpected jobs in the jobDb.
 			for _, job := range preemptedJobs {
@@ -522,9 +493,13 @@ func TestSchedule(t *testing.T) {
 				dbJob := txn.GetById(job.Id())
 				assert.True(t, job.Equal(dbJob), "expected %v but got %v", job, dbJob)
 			}
-			for _, job := range failedJobs {
-				dbJob := txn.GetById(job.Id())
-				assert.True(t, job.Equal(dbJob), "expected %v but got %v", job, dbJob)
+
+			// Check that we calculated fair share and adjusted fair share
+			for _, schCtx := range schedulerResult.SchedulingContexts {
+				for _, qtx := range schCtx.QueueSchedulingContexts {
+					assert.NotEqual(t, 0, qtx.AdjustedFairShare)
+					assert.NotEqual(t, 0, qtx.FairShare)
+				}
 			}
 		})
 	}
@@ -563,7 +538,6 @@ func BenchmarkNodeDbConstruction(b *testing.B) {
 
 				nodeDb, err := nodedb.NewNodeDb(
 					schedulingConfig.PriorityClasses,
-					schedulingConfig.MaxExtraNodesToConsider,
 					schedulingConfig.IndexedResources,
 					schedulingConfig.IndexedTaints,
 					schedulingConfig.IndexedNodeLabels,

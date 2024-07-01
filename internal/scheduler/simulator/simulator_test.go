@@ -10,16 +10,18 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 
-	"github.com/armadaproject/armada/internal/armada/configuration"
 	"github.com/armadaproject/armada/internal/common/armadacontext"
 	armadaslices "github.com/armadaproject/armada/internal/common/slices"
 	"github.com/armadaproject/armada/internal/common/types"
-	schedulerobjects "github.com/armadaproject/armada/internal/scheduler/schedulerobjects"
+	"github.com/armadaproject/armada/internal/scheduler/configuration"
+	"github.com/armadaproject/armada/internal/scheduler/schedulerobjects"
 	"github.com/armadaproject/armada/internal/scheduler/testfixtures"
 	"github.com/armadaproject/armada/pkg/armadaevents"
 )
 
 func TestSimulator(t *testing.T) {
+	enableFastForward := false
+	schedulerCyclePeriodSeconds := 10
 	tests := map[string]struct {
 		clusterSpec            *ClusterSpec
 		workloadSpec           *WorkloadSpec
@@ -434,7 +436,7 @@ func TestSimulator(t *testing.T) {
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			s, err := NewSimulator(tc.clusterSpec, tc.workloadSpec, tc.schedulingConfig)
+			s, err := NewSimulator(tc.clusterSpec, tc.workloadSpec, tc.schedulingConfig, enableFastForward, int((tc.simulatedTimeLimit + time.Hour).Minutes()), schedulerCyclePeriodSeconds)
 			require.NoError(t, err)
 			mc := NewMetricsCollector(s.StateTransitions())
 			actualEventSequences := make([]*armadaevents.EventSequence, 0, 128)

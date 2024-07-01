@@ -105,9 +105,13 @@ type Job struct {
 	// Required: true
 	Runs []*Run `json:"runs"`
 
+	// runtime seconds
+	// Required: true
+	RuntimeSeconds int32 `json:"runtimeSeconds"`
+
 	// state
 	// Required: true
-	// Enum: [QUEUED PENDING RUNNING SUCCEEDED FAILED CANCELLED PREEMPTED LEASED]
+	// Enum: [QUEUED PENDING RUNNING SUCCEEDED FAILED CANCELLED PREEMPTED LEASED REJECTED]
 	State string `json:"state"`
 
 	// submitted
@@ -178,6 +182,10 @@ func (m *Job) Validate(formats strfmt.Registry) error {
 	}
 
 	if err := m.validateRuns(formats); err != nil {
+		res = append(res, err)
+	}
+
+	if err := m.validateRuntimeSeconds(formats); err != nil {
 		res = append(res, err)
 	}
 
@@ -375,11 +383,20 @@ func (m *Job) validateRuns(formats strfmt.Registry) error {
 	return nil
 }
 
+func (m *Job) validateRuntimeSeconds(formats strfmt.Registry) error {
+
+	if err := validate.Required("runtimeSeconds", "body", int32(m.RuntimeSeconds)); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 var jobTypeStatePropEnum []interface{}
 
 func init() {
 	var res []string
-	if err := json.Unmarshal([]byte(`["QUEUED","PENDING","RUNNING","SUCCEEDED","FAILED","CANCELLED","PREEMPTED","LEASED"]`), &res); err != nil {
+	if err := json.Unmarshal([]byte(`["QUEUED","PENDING","RUNNING","SUCCEEDED","FAILED","CANCELLED","PREEMPTED","LEASED","REJECTED"]`), &res); err != nil {
 		panic(err)
 	}
 	for _, v := range res {
@@ -412,6 +429,9 @@ const (
 
 	// JobStateLEASED captures enum value "LEASED"
 	JobStateLEASED string = "LEASED"
+
+	// JobStateREJECTED captures enum value "REJECTED"
+	JobStateREJECTED string = "REJECTED"
 )
 
 // prop value enum

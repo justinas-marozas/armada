@@ -9,17 +9,17 @@ import { SidebarHeader } from "./SidebarHeader"
 import { SidebarTabJobCommands } from "./SidebarTabJobCommands"
 import { SidebarTabJobDetails } from "./SidebarTabJobDetails"
 import { SidebarTabJobLogs } from "./SidebarTabJobLogs"
-import { SidebarTabJobRuns } from "./SidebarTabJobRuns"
+import { SidebarTabJobResult } from "./SidebarTabJobResult"
 import { SidebarTabJobYaml } from "./SidebarTabJobYaml"
 import { ICordonService } from "../../../services/lookoutV2/CordonService"
-import { IGetJobSpecService } from "../../../services/lookoutV2/GetJobSpecService"
-import { IGetRunErrorService } from "../../../services/lookoutV2/GetRunErrorService"
+import { IGetJobInfoService } from "../../../services/lookoutV2/GetJobInfoService"
+import { IGetRunInfoService } from "../../../services/lookoutV2/GetRunInfoService"
 import { ILogService } from "../../../services/lookoutV2/LogService"
 import { CommandSpec } from "../../../utils"
 
 enum SidebarTab {
   JobDetails = "JobDetails",
-  JobRuns = "JobRuns",
+  JobResult = "JobResult",
   Yaml = "Yaml",
   Logs = "Logs",
   Commands = "Commands",
@@ -33,8 +33,8 @@ type ResizeState = {
 
 export interface SidebarProps {
   job: Job
-  runErrorService: IGetRunErrorService
-  jobSpecService: IGetJobSpecService
+  runInfoService: IGetRunInfoService
+  jobSpecService: IGetJobInfoService
   logService: ILogService
   cordonService: ICordonService
   sidebarWidth: number
@@ -46,7 +46,7 @@ export interface SidebarProps {
 export const Sidebar = memo(
   ({
     job,
-    runErrorService,
+    runInfoService,
     jobSpecService,
     logService,
     cordonService,
@@ -165,7 +165,7 @@ export const Sidebar = memo(
               <TabContext value={openTab}>
                 <Tabs value={openTab} onChange={handleTabChange} className={styles.sidebarTabs}>
                   <Tab label="Details" value={SidebarTab.JobDetails} sx={{ minWidth: "50px" }}></Tab>
-                  <Tab label="Runs" value={SidebarTab.JobRuns} sx={{ minWidth: "50px" }}></Tab>
+                  <Tab label="Result" value={SidebarTab.JobResult} sx={{ minWidth: "50px" }}></Tab>
                   <Tab label="Yaml" value={SidebarTab.Yaml} sx={{ minWidth: "50px" }}></Tab>
                   <Tab
                     label="Logs"
@@ -185,8 +185,13 @@ export const Sidebar = memo(
                   <SidebarTabJobDetails job={job} jobSpecService={jobSpecService} />
                 </TabPanel>
 
-                <TabPanel value={SidebarTab.JobRuns} className={styles.sidebarTabPanel}>
-                  <SidebarTabJobRuns job={job} runErrorService={runErrorService} cordonService={cordonService} />
+                <TabPanel value={SidebarTab.JobResult} className={styles.sidebarTabPanel}>
+                  <SidebarTabJobResult
+                    job={job}
+                    jobInfoService={jobSpecService}
+                    runInfoService={runInfoService}
+                    cordonService={cordonService}
+                  />
                 </TabPanel>
 
                 <TabPanel value={SidebarTab.Yaml} className={styles.sidebarTabPanel}>

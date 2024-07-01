@@ -21,17 +21,12 @@ import (
 )
 
 func withGroupJobsSetup(f func(*instructions.InstructionConverter, *lookoutdb.LookoutDb, *SqlGroupJobsRepository) error) error {
-	for _, useJsonbBackend := range []bool{false, true} {
-		if err := lookout.WithLookoutDb(func(db *pgxpool.Pool) error {
-			converter := instructions.NewInstructionConverter(metrics.Get(), userAnnotationPrefix, &compress.NoOpCompressor{})
-			store := lookoutdb.NewLookoutDb(db, nil, metrics.Get(), 10)
-			repo := NewSqlGroupJobsRepository(db, useJsonbBackend)
-			return f(converter, store, repo)
-		}); err != nil {
-			return err
-		}
-	}
-	return nil
+	return lookout.WithLookoutDb(func(db *pgxpool.Pool) error {
+		converter := instructions.NewInstructionConverter(metrics.Get(), userAnnotationPrefix, &compress.NoOpCompressor{})
+		store := lookoutdb.NewLookoutDb(db, nil, metrics.Get(), 10)
+		repo := NewSqlGroupJobsRepository(db)
+		return f(converter, store, repo)
+	})
 }
 
 func TestGroupByQueue(t *testing.T) {
@@ -663,6 +658,7 @@ func TestGroupJobsWithAllStateCounts(t *testing.T) {
 						string(lookout.JobFailed):    0,
 						string(lookout.JobCancelled): 0,
 						string(lookout.JobPreempted): 0,
+						string(lookout.JobRejected):  0,
 					},
 				},
 			},
@@ -679,6 +675,7 @@ func TestGroupJobsWithAllStateCounts(t *testing.T) {
 						string(lookout.JobFailed):    0,
 						string(lookout.JobCancelled): 10,
 						string(lookout.JobPreempted): 9,
+						string(lookout.JobRejected):  0,
 					},
 				},
 			},
@@ -695,6 +692,7 @@ func TestGroupJobsWithAllStateCounts(t *testing.T) {
 						string(lookout.JobFailed):    12,
 						string(lookout.JobCancelled): 0,
 						string(lookout.JobPreempted): 0,
+						string(lookout.JobRejected):  0,
 					},
 				},
 			},
@@ -1559,7 +1557,7 @@ func makeFailed(opts *createJobsOpts, converter *instructions.InstructionConvert
 		}).
 		Pending(runId, cluster, lastTransitionTime.Add(-2*time.Minute)).
 		Running(runId, cluster, lastTransitionTime.Add(-1*time.Minute)).
-		RunFailed(runId, node, 1, "error", lastTransitionTime).
+		RunFailed(runId, node, 1, "error", "debug", lastTransitionTime).
 		Failed(node, 1, "error", lastTransitionTime).
 		Build()
 }

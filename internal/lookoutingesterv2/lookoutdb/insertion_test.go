@@ -14,6 +14,7 @@ import (
 
 	"github.com/armadaproject/armada/internal/common/armadacontext"
 	"github.com/armadaproject/armada/internal/common/database/lookout"
+	"github.com/armadaproject/armada/internal/common/ingest/testfixtures"
 	"github.com/armadaproject/armada/internal/common/pulsarutils"
 	"github.com/armadaproject/armada/internal/lookoutingesterv2/metrics"
 	"github.com/armadaproject/armada/internal/lookoutingesterv2/model"
@@ -34,11 +35,7 @@ const (
 	priority         = 3
 	updatePriority   = 4
 	priorityClass    = "default"
-	updateState      = 5
-	podNumber        = 6
-	jobJson          = `{"foo": "bar"}`
 	jobProto         = "hello world"
-	containerName    = "testContainer"
 )
 
 var m = metrics.Get()
@@ -56,7 +53,7 @@ var (
 	fatalErrors     = []*regexp.Regexp{regexp.MustCompile("SQLSTATE 22001")}
 )
 
-// An invalid job id that exceeds th varchar count
+// An invalid job id that exceeds the varchar count
 var invalidId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 type JobRow struct {
@@ -92,15 +89,13 @@ type JobRunRow struct {
 	Finished    *time.Time
 	JobRunState int32
 	Error       []byte
+	Debug       []byte
 	ExitCode    *int32
 }
 
-type UserAnnotationRow struct {
-	JobId  string
-	Key    string
-	Value  string
-	Queue  string
-	JobSet string
+type JobErrorRow struct {
+	JobId string
+	Error []byte
 }
 
 func defaultInstructionSet() *model.InstructionSet {
@@ -126,15 +121,13 @@ func defaultInstructionSet() *model.InstructionSet {
 			Node:        pointer.String(nodeName),
 			Started:     &startTime,
 			Finished:    &finishedTime,
+			Debug:       []byte(testfixtures.DebugMsg),
 			JobRunState: pointer.Int32(lookout.JobRunSucceededOrdinal),
 			ExitCode:    pointer.Int32(0),
 		}},
-		UserAnnotationsToCreate: []*model.CreateUserAnnotationInstruction{{
-			JobId:  jobIdString,
-			Key:    "someKey",
-			Value:  "someValue",
-			Queue:  queue,
-			Jobset: jobSetName,
+		JobErrorsToCreate: []*model.CreateJobErrorInstruction{{
+			JobId: jobIdString,
+			Error: []byte(testfixtures.ErrMsg),
 		}},
 		MessageIds: []pulsar.MessageID{pulsarutils.NewMessageId(3)},
 	}
@@ -188,6 +181,11 @@ var expectedJobRun = JobRunRow{
 	JobRunState: lookout.JobRunPendingOrdinal,
 }
 
+var expectedJobError = JobErrorRow{
+	JobId: jobIdString,
+	Error: []byte(testfixtures.ErrMsg),
+}
+
 var expectedJobRunAfterUpdate = JobRunRow{
 	RunId:       runIdString,
 	JobId:       jobIdString,
@@ -198,14 +196,7 @@ var expectedJobRunAfterUpdate = JobRunRow{
 	Finished:    &finishedTime,
 	JobRunState: lookout.JobRunSucceededOrdinal,
 	ExitCode:    pointer.Int32(0),
-}
-
-var expectedUserAnnotation = UserAnnotationRow{
-	JobId:  jobIdString,
-	Key:    "someKey",
-	Value:  "someValue",
-	Queue:  queue,
-	JobSet: jobSetName,
+	Debug:       []byte(testfixtures.DebugMsg),
 }
 
 func TestCreateJobsBatch(t *testing.T) {
@@ -604,34 +595,57 @@ func TestUpdateJobRunsScalar(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-func TestCreateUserAnnotationsBatch(t *testing.T) {
+func TestCreateJobErrorsBatch(t *testing.T) {
 	err := lookout.WithLookoutDb(func(db *pgxpool.Pool) error {
 		ldb := NewLookoutDb(db, fatalErrors, m, 10)
-		// Need to make sure we have a job
-		err := ldb.CreateJobsBatch(armadacontext.Background(), defaultInstructionSet().JobsToCreate)
-		assert.Nil(t, err)
 
 		// Insert
-		err = ldb.CreateUserAnnotationsBatch(armadacontext.Background(), defaultInstructionSet().UserAnnotationsToCreate)
+		err := ldb.CreateJobErrorsBatch(armadacontext.Background(), defaultInstructionSet().JobErrorsToCreate)
 		assert.Nil(t, err)
-		annotation := getUserAnnotationLookup(t, db, jobIdString)
-		assert.Equal(t, expectedUserAnnotation, annotation)
+		jobError := getJobError(t, db, jobIdString)
+		assert.Equal(t, expectedJobError, jobError)
 
 		// Insert again and test that it's idempotent
-		err = ldb.CreateUserAnnotationsBatch(armadacontext.Background(), defaultInstructionSet().UserAnnotationsToCreate)
+		err = ldb.CreateJobErrorsBatch(armadacontext.Background(), defaultInstructionSet().JobErrorsToCreate)
 		assert.Nil(t, err)
-		annotation = getUserAnnotationLookup(t, db, jobIdString)
-		assert.Equal(t, expectedUserAnnotation, annotation)
+		jobError = getJobError(t, db, jobIdString)
+		assert.Equal(t, expectedJobError, jobError)
+
+		// Insert again with a different value and check we don't overwrite
+		jobErrors := defaultInstructionSet().JobErrorsToCreate
+		jobErrors[0].Error = []byte{}
+		err = ldb.CreateJobErrorsBatch(armadacontext.Background(), jobErrors)
+		assert.Nil(t, err)
+		jobError = getJobError(t, db, jobIdString)
+		assert.Equal(t, expectedJobError, jobError)
 
 		// If a row is bad then we should return an error and no updates should happen
-		_, err = ldb.db.Exec(armadacontext.Background(), "DELETE FROM user_annotation_lookup")
+		_, err = ldb.db.Exec(armadacontext.Background(), "DELETE FROM job_error")
 		assert.NoError(t, err)
-		invalidAnnotation := &model.CreateUserAnnotationInstruction{
+		invalidError := &model.CreateJobErrorInstruction{
 			JobId: invalidId,
 		}
-		err = ldb.CreateUserAnnotationsBatch(armadacontext.Background(), append(defaultInstructionSet().UserAnnotationsToCreate, invalidAnnotation))
+		err = ldb.CreateJobErrorsBatch(armadacontext.Background(), append(defaultInstructionSet().JobErrorsToCreate, invalidError))
 		assert.Error(t, err)
-		assertNoRows(t, ldb.db, "user_annotation_lookup")
+		assertNoRows(t, db, "job_error")
+		return nil
+	})
+	assert.NoError(t, err)
+}
+
+func TestCreateJobErrorsScalar(t *testing.T) {
+	err := lookout.WithLookoutDb(func(db *pgxpool.Pool) error {
+		ldb := NewLookoutDb(db, fatalErrors, m, 10)
+
+		// Insert
+		ldb.CreateJobErrorsScalar(armadacontext.Background(), defaultInstructionSet().JobErrorsToCreate)
+		jobError := getJobError(t, db, jobIdString)
+		assert.Equal(t, expectedJobError, jobError)
+
+		// Insert again and test that it's idempotent
+		ldb.CreateJobErrorsScalar(armadacontext.Background(), defaultInstructionSet().JobErrorsToCreate)
+		jobError = getJobError(t, db, jobIdString)
+		assert.Equal(t, expectedJobError, jobError)
 		return nil
 	})
 	assert.NoError(t, err)
@@ -646,38 +660,6 @@ func TestStoreWithEmptyInstructionSet(t *testing.T) {
 		assert.NoError(t, err)
 		assertNoRows(t, ldb.db, "job")
 		assertNoRows(t, ldb.db, "job_run")
-		assertNoRows(t, ldb.db, "user_annotation_lookup")
-		return nil
-	})
-	assert.NoError(t, err)
-}
-
-func TestCreateUserAnnotationsScalar(t *testing.T) {
-	err := lookout.WithLookoutDb(func(db *pgxpool.Pool) error {
-		ldb := NewLookoutDb(db, fatalErrors, m, 10)
-		// Need to make sure we have a job
-		err := ldb.CreateJobsBatch(armadacontext.Background(), defaultInstructionSet().JobsToCreate)
-		assert.Nil(t, err)
-
-		// Insert
-		ldb.CreateUserAnnotationsScalar(armadacontext.Background(), defaultInstructionSet().UserAnnotationsToCreate)
-		annotation := getUserAnnotationLookup(t, db, jobIdString)
-		assert.Equal(t, expectedUserAnnotation, annotation)
-
-		// Insert again and test that it's idempotent
-		ldb.CreateUserAnnotationsScalar(armadacontext.Background(), defaultInstructionSet().UserAnnotationsToCreate)
-		annotation = getUserAnnotationLookup(t, db, jobIdString)
-		assert.Equal(t, expectedUserAnnotation, annotation)
-
-		// If a row is bad then we should update the rows we can
-		_, err = ldb.db.Exec(armadacontext.Background(), "DELETE FROM user_annotation_lookup")
-		assert.NoError(t, err)
-		invalidAnnotation := &model.CreateUserAnnotationInstruction{
-			JobId: invalidId,
-		}
-		ldb.CreateUserAnnotationsScalar(armadacontext.Background(), append(defaultInstructionSet().UserAnnotationsToCreate, invalidAnnotation))
-		annotation = getUserAnnotationLookup(t, ldb.db, jobIdString)
-		assert.Equal(t, expectedUserAnnotation, annotation)
 		return nil
 	})
 	assert.NoError(t, err)
@@ -692,11 +674,9 @@ func TestStore(t *testing.T) {
 
 		job := getJob(t, ldb.db, jobIdString)
 		jobRun := getJobRun(t, ldb.db, runIdString)
-		annotation := getUserAnnotationLookup(t, ldb.db, jobIdString)
 
 		assert.Equal(t, expectedJobAfterUpdate, job)
 		assert.Equal(t, expectedJobRunAfterUpdate, jobRun)
-		assert.Equal(t, expectedUserAnnotation, annotation)
 		return nil
 	})
 	assert.NoError(t, err)
@@ -815,12 +795,12 @@ func TestConflateJobRunUpdates(t *testing.T) {
 	// Non-Empty
 	updates = conflateJobRunUpdates([]*model.UpdateJobRunInstruction{
 		{RunId: runIdString, Started: &baseTime},
-		{RunId: runIdString, Node: pointer.String(nodeName)},
+		{RunId: runIdString, Node: pointer.String(nodeName), Debug: []byte("some \000 debug \000")},
 		{RunId: "someOtherJobRun", Started: &baseTime},
 	})
 
 	expected := []*model.UpdateJobRunInstruction{
-		{RunId: runIdString, Started: &baseTime, Node: pointer.String(nodeName)},
+		{RunId: runIdString, Started: &baseTime, Node: pointer.String(nodeName), Debug: []byte("some \000 debug \000")},
 		{RunId: "someOtherJobRun", Started: &baseTime},
 	}
 
@@ -850,9 +830,11 @@ func TestStoreNullValue(t *testing.T) {
 	err := lookout.WithLookoutDb(func(db *pgxpool.Pool) error {
 		jobProto := []byte("hello \000 world \000")
 		errorMsg := []byte("some \000 error \000")
+		debugMsg := []byte("some \000 debug \000")
 		instructions := defaultInstructionSet()
 		instructions.JobsToCreate[0].JobProto = jobProto
 		instructions.JobRunsToUpdate[0].Error = errorMsg
+		instructions.JobRunsToUpdate[0].Debug = debugMsg
 
 		ldb := NewLookoutDb(db, fatalErrors, m, 10)
 		// Do the update
@@ -864,6 +846,7 @@ func TestStoreNullValue(t *testing.T) {
 
 		assert.Equal(t, jobProto, job.JobProto)
 		assert.Equal(t, errorMsg, jobRun.Error)
+		assert.Equal(t, debugMsg, jobRun.Debug)
 		return nil
 	})
 	assert.NoError(t, err)
@@ -1019,7 +1002,8 @@ func getJobRun(t *testing.T, db *pgxpool.Pool, runId string) JobRunRow {
 			finished,
 			job_run_state,
 			error,
-			exit_code
+			exit_code,
+			debug
 		FROM job_run WHERE run_id = $1`,
 		runId)
 	err := r.Scan(
@@ -1033,20 +1017,23 @@ func getJobRun(t *testing.T, db *pgxpool.Pool, runId string) JobRunRow {
 		&run.JobRunState,
 		&run.Error,
 		&run.ExitCode,
+		&run.Debug,
 	)
 	assert.NoError(t, err)
 	return run
 }
 
-func getUserAnnotationLookup(t *testing.T, db *pgxpool.Pool, jobId string) UserAnnotationRow {
-	annotation := UserAnnotationRow{}
+func getJobError(t *testing.T, db *pgxpool.Pool, jobId string) JobErrorRow {
+	errorRow := JobErrorRow{}
 	r := db.QueryRow(
 		armadacontext.Background(),
-		`SELECT job_id, key, value, queue, jobset FROM user_annotation_lookup WHERE job_id = $1`,
+		"SELECT job_id, error FROM job_error WHERE job_id = $1",
 		jobId)
-	err := r.Scan(&annotation.JobId, &annotation.Key, &annotation.Value, &annotation.Queue, &annotation.JobSet)
+
+	err := r.Scan(&errorRow.JobId, &errorRow.Error)
+
 	assert.NoError(t, err)
-	return annotation
+	return errorRow
 }
 
 func assertNoRows(t *testing.T, db *pgxpool.Pool, table string) {

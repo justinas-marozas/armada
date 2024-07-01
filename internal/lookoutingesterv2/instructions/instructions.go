@@ -1,7 +1,6 @@
 package instructions
 
 import (
-	"sort"
 	"strings"
 	"time"
 
@@ -107,8 +106,6 @@ func (c *InstructionConverter) convertSequence(
 			err = c.handleJobRunSucceeded(ts, event.GetJobRunSucceeded(), update)
 		case *armadaevents.EventSequence_Event_JobRunErrors:
 			err = c.handleJobRunErrors(ts, event.GetJobRunErrors(), update)
-		case *armadaevents.EventSequence_Event_JobDuplicateDetected:
-			err = c.handleJobDuplicateDetected(ts, event.GetJobDuplicateDetected(), update)
 		case *armadaevents.EventSequence_Event_JobRunPreempted:
 			err = c.handleJobRunPreempted(ts, event.GetJobRunPreempted(), update)
 		case *armadaevents.EventSequence_Event_JobRequeued:
@@ -121,6 +118,7 @@ func (c *InstructionConverter) convertSequence(
 		case *armadaevents.EventSequence_Event_ResourceUtilisation:
 		case *armadaevents.EventSequence_Event_StandaloneIngressInfo:
 		case *armadaevents.EventSequence_Event_PartitionMarker:
+		case *armadaevents.EventSequence_Event_JobValidated:
 			log.Debugf("Ignoring event type %T", event.GetEvent())
 		default:
 			log.Warnf("Ignoring unknown event type %T", event.GetEvent())
@@ -144,10 +142,6 @@ func (c *InstructionConverter) handleSubmitJob(
 	if err != nil {
 		c.metrics.RecordPulsarMessageError(metrics.PulsarMessageErrorProcessing)
 		return err
-	}
-	if event.IsDuplicate {
-		log.Debugf("job %s is a duplicate, ignoring", jobId)
-		return nil
 	}
 
 	// Try and marshall the job proto. This shouldn't go wrong but if it does, it's not a fatal error
@@ -200,15 +194,11 @@ func (c *InstructionConverter) handleSubmitJob(
 	}
 	update.JobsToCreate = append(update.JobsToCreate, &job)
 
-	annotationInstructions := createUserAnnotationInstructions(jobId, queue, jobSet, annotations)
-	update.UserAnnotationsToCreate = append(update.UserAnnotationsToCreate, annotationInstructions...)
-
 	return err
 }
 
-// extractUserAnnotations strips userAnnotationPrefix from all keys and
-// truncates keys and values to their maximal lengths (as specified by
-// maxAnnotationKeyLen and maxAnnotationValLen).
+// extractUserAnnotations strips userAnnotationPrefix from all keys and truncates keys and values to their maximal
+// lengths (as specified by maxAnnotationKeyLen and maxAnnotationValLen).
 func extractUserAnnotations(userAnnotationPrefix string, jobAnnotations map[string]string) map[string]string {
 	result := make(map[string]string, len(jobAnnotations))
 	n := len(userAnnotationPrefix)
@@ -223,31 +213,6 @@ func extractUserAnnotations(userAnnotationPrefix string, jobAnnotations map[stri
 	return result
 }
 
-func createUserAnnotationInstructions(jobId string, queue string, jobset string, userAnnotations map[string]string) []*model.CreateUserAnnotationInstruction {
-	// This intermediate variable exists because we want our output to be deterministic
-	// Iteration over a map in go is non-deterministic, so we read everything into annotations
-	// and then sort it.
-	instructions := make([]*model.CreateUserAnnotationInstruction, 0, len(userAnnotations))
-	for k, v := range userAnnotations {
-		if k != "" {
-			instructions = append(instructions, &model.CreateUserAnnotationInstruction{
-				JobId:  jobId,
-				Key:    k,
-				Value:  v,
-				Queue:  queue,
-				Jobset: jobset,
-			})
-		} else {
-			log.WithField("JobId", jobId).Warnf("Ignoring annotation with empty key")
-		}
-	}
-	// sort to make output deterministic
-	sort.Slice(instructions, func(i, j int) bool {
-		return instructions[i].Key < instructions[j].Key
-	})
-	return instructions
-}
-
 func (c *InstructionConverter) handleReprioritiseJob(ts time.Time, event *armadaevents.ReprioritisedJob, update *model.InstructionSet) error {
 	jobId, err := armadaevents.UlidStringFromProtoUuid(event.GetJobId())
 	if err != nil {
@@ -258,21 +223,6 @@ func (c *InstructionConverter) handleReprioritiseJob(ts time.Time, event *armada
 	jobUpdate := model.UpdateJobInstruction{
 		JobId:    jobId,
 		Priority: pointer.Int64(int64(event.Priority)),
-	}
-	update.JobsToUpdate = append(update.JobsToUpdate, &jobUpdate)
-	return nil
-}
-
-func (c *InstructionConverter) handleJobDuplicateDetected(ts time.Time, event *armadaevents.JobDuplicateDetected, update *model.InstructionSet) error {
-	jobId, err := armadaevents.UlidStringFromProtoUuid(event.GetNewJobId())
-	if err != nil {
-		c.metrics.RecordPulsarMessageError(metrics.PulsarMessageErrorProcessing)
-		return err
-	}
-
-	jobUpdate := model.UpdateJobInstruction{
-		JobId:     jobId,
-		Duplicate: pointer.Bool(true),
 	}
 	update.JobsToUpdate = append(update.JobsToUpdate, &jobUpdate)
 	return nil
@@ -331,11 +281,16 @@ func (c *InstructionConverter) handleJobErrors(ts time.Time, event *armadaevents
 		}
 
 		state := lookout.JobFailedOrdinal
-		switch e.Reason.(type) {
-		// We should have a JobPreempted event rather than relying on type of JobErrors
-		// For now this is how we can identify if the job was preempted or failed
+		switch reason := e.Reason.(type) {
+		// Preempted and Rejected jobs are modelled as Reasons on a JobErrors msg
 		case *armadaevents.Error_JobRunPreemptedError:
 			state = lookout.JobPreemptedOrdinal
+		case *armadaevents.Error_JobRejected:
+			state = lookout.JobRejectedOrdinal
+			update.JobErrorsToCreate = append(update.JobErrorsToCreate, &model.CreateJobErrorInstruction{
+				JobId: jobId,
+				Error: tryCompressError(jobId, reason.JobRejected.Message, c.compressor),
+			})
 		}
 
 		jobUpdate := model.UpdateJobInstruction{
@@ -531,6 +486,7 @@ func (c *InstructionConverter) handleJobRunErrors(ts time.Time, event *armadaeve
 			jobRunUpdate.Node = extractNodeName(reason.PodError)
 			jobRunUpdate.JobRunState = pointer.Int32(lookout.JobRunFailedOrdinal)
 			jobRunUpdate.Error = tryCompressError(jobId, reason.PodError.GetMessage(), c.compressor)
+			jobRunUpdate.Debug = tryCompressError(jobId, reason.PodError.DebugMessage, c.compressor)
 			var exitCode int32 = 0
 			for _, containerError := range reason.PodError.ContainerErrors {
 				if containerError.ExitCode != 0 {
@@ -550,6 +506,7 @@ func (c *InstructionConverter) handleJobRunErrors(ts time.Time, event *armadaeve
 		case *armadaevents.Error_PodLeaseReturned:
 			jobRunUpdate.JobRunState = pointer.Int32(lookout.JobRunLeaseReturnedOrdinal)
 			jobRunUpdate.Error = tryCompressError(jobId, reason.PodLeaseReturned.GetMessage(), c.compressor)
+			jobRunUpdate.Debug = tryCompressError(jobId, reason.PodLeaseReturned.GetDebugMessage(), c.compressor)
 		case *armadaevents.Error_LeaseExpired:
 			jobRunUpdate.JobRunState = pointer.Int32(lookout.JobRunLeaseExpiredOrdinal)
 			jobRunUpdate.Error = tryCompressError(jobId, "Lease expired", c.compressor)

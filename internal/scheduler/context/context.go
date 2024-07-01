@@ -20,18 +20,13 @@ import (
 	armadamaps "github.com/armadaproject/armada/internal/common/maps"
 	armadaslices "github.com/armadaproject/armada/internal/common/slices"
 	"github.com/armadaproject/armada/internal/common/types"
+	schedulerconfig "github.com/armadaproject/armada/internal/scheduler/configuration"
 	"github.com/armadaproject/armada/internal/scheduler/fairness"
 	"github.com/armadaproject/armada/internal/scheduler/interfaces"
+	"github.com/armadaproject/armada/internal/scheduler/internaltypes"
 	"github.com/armadaproject/armada/internal/scheduler/jobdb"
 	"github.com/armadaproject/armada/internal/scheduler/schedulerobjects"
 )
-
-// defaultSchedulingKeyGenerator is used for computing scheduling keys for legacy api.Job where one is not pre-computed.
-var defaultSchedulingKeyGenerator *schedulerobjects.SchedulingKeyGenerator
-
-func init() {
-	defaultSchedulingKeyGenerator = schedulerobjects.NewSchedulingKeyGenerator()
-}
 
 // SchedulingContext contains information necessary for scheduling and records what happened in a scheduling round.
 type SchedulingContext struct {
@@ -115,6 +110,7 @@ func (sctx *SchedulingContext) ClearUnfeasibleSchedulingKeys() {
 func (sctx *SchedulingContext) AddQueueSchedulingContext(
 	queue string, weight float64,
 	initialAllocatedByPriorityClass schedulerobjects.QuantityByTAndResourceType[string],
+	demand schedulerobjects.ResourceList,
 	limiter *rate.Limiter,
 ) error {
 	if _, ok := sctx.QueueSchedulingContexts[queue]; ok {
@@ -142,6 +138,7 @@ func (sctx *SchedulingContext) AddQueueSchedulingContext(
 		Weight:                            weight,
 		Limiter:                           limiter,
 		Allocated:                         allocated,
+		Demand:                            demand,
 		AllocatedByPriorityClass:          initialAllocatedByPriorityClass,
 		ScheduledResourcesByPriorityClass: make(schedulerobjects.QuantityByTAndResourceType[string]),
 		EvictedResourcesByPriorityClass:   make(schedulerobjects.QuantityByTAndResourceType[string]),
@@ -167,9 +164,76 @@ func (sctx *SchedulingContext) GetQueue(queue string) (fairness.Queue, bool) {
 func (sctx *SchedulingContext) TotalCost() float64 {
 	var rv float64
 	for _, qctx := range sctx.QueueSchedulingContexts {
-		rv += sctx.FairnessCostProvider.CostFromQueue(qctx)
+		rv += sctx.FairnessCostProvider.UnweightedCostFromQueue(qctx)
 	}
 	return rv
+}
+
+// UpdateFairShares updates FairShare and AdjustedFairShare for every QueueSchedulingContext associated with the
+// SchedulingContext.  This works by calculating a far share as queue_weight/sum_of_all_queue_weights and an
+// AdjustedFairShare by resharing any unused capacity (as determined by a queue's demand)
+func (sctx *SchedulingContext) UpdateFairShares() {
+	const maxIterations = 5
+
+	type queueInfo struct {
+		queueName     string
+		adjustedShare float64
+		fairShare     float64
+		weight        float64
+		cappedShare   float64
+	}
+
+	queueInfos := make([]*queueInfo, 0, len(sctx.QueueSchedulingContexts))
+	for queueName, qctx := range sctx.QueueSchedulingContexts {
+		cappedShare := 1.0
+		if !sctx.TotalResources.IsZero() {
+			cappedShare = sctx.FairnessCostProvider.UnweightedCostFromAllocation(qctx.Demand)
+		}
+		queueInfos = append(queueInfos, &queueInfo{
+			queueName:     queueName,
+			adjustedShare: 0,
+			fairShare:     qctx.Weight / sctx.WeightSum,
+			weight:        qctx.Weight,
+			cappedShare:   cappedShare,
+		})
+	}
+
+	// We do this so that we get deterministic output
+	slices.SortFunc(queueInfos, func(a, b *queueInfo) int {
+		return strings.Compare(a.queueName, b.queueName)
+	})
+
+	unallocated := 1.0 // this is the proportion of the cluster that we can share each time
+
+	// We will reshare unused capacity until we've reshared 99% of all capacity or we've completed 5 iteration
+	for i := 0; i < maxIterations && unallocated > 0.01; i++ {
+		totalWeight := 0.0
+		for _, q := range queueInfos {
+			totalWeight += q.weight
+		}
+
+		for _, q := range queueInfos {
+			if q.weight > 0 {
+				share := (q.weight / totalWeight) * unallocated
+				q.adjustedShare += share
+			}
+		}
+		unallocated = 0.0
+		for _, q := range queueInfos {
+			excessShare := q.adjustedShare - q.cappedShare
+			if excessShare > 0 {
+				q.adjustedShare = q.cappedShare
+				q.weight = 0.0
+				unallocated += excessShare
+			}
+		}
+	}
+
+	for _, q := range queueInfos {
+		qtx := sctx.QueueSchedulingContexts[q.queueName]
+		qtx.FairShare = q.fairShare
+		qtx.AdjustedFairShare = q.adjustedShare
+	}
 }
 
 func (sctx *SchedulingContext) ReportString(verbosity int32) string {
@@ -221,18 +285,16 @@ func (sctx *SchedulingContext) ReportString(verbosity int32) string {
 
 func (sctx *SchedulingContext) AddGangSchedulingContext(gctx *GangSchedulingContext) (bool, error) {
 	allJobsEvictedInThisRound := true
-	numberOfSuccessfulJobs := 0
+	allJobsSuccessful := true
 	for _, jctx := range gctx.JobSchedulingContexts {
 		evictedInThisRound, err := sctx.AddJobSchedulingContext(jctx)
 		if err != nil {
 			return false, err
 		}
 		allJobsEvictedInThisRound = allJobsEvictedInThisRound && evictedInThisRound
-		if jctx.IsSuccessful() {
-			numberOfSuccessfulJobs++
-		}
+		allJobsSuccessful = allJobsSuccessful && jctx.IsSuccessful()
 	}
-	if numberOfSuccessfulJobs >= gctx.GangInfo.MinimumCardinality && !allJobsEvictedInThisRound {
+	if allJobsSuccessful && !allJobsEvictedInThisRound {
 		sctx.NumScheduledGangs++
 	}
 	return allJobsEvictedInThisRound, nil
@@ -350,6 +412,13 @@ type QueueSchedulingContext struct {
 	// Total resources assigned to the queue across all clusters by priority class priority.
 	// Includes jobs scheduled during this invocation of the scheduler.
 	Allocated schedulerobjects.ResourceList
+	// Total demand from this queue.  This is essentially the cumulative resources of all non-terminal jobs at the
+	// start of the scheduling cycle
+	Demand schedulerobjects.ResourceList
+	// Fair share is the weight of this queue over the sum of the weights of all queues
+	FairShare float64
+	// AdjustedFairShare modifies fair share such that queues that have a demand cost less than their fair share, have their fair share reallocated.
+	AdjustedFairShare float64
 	// Total resources assigned to the queue across all clusters by priority class.
 	// Includes jobs scheduled during this invocation of the scheduler.
 	AllocatedByPriorityClass schedulerobjects.QuantityByTAndResourceType[string]
@@ -363,13 +432,6 @@ type QueueSchedulingContext struct {
 	UnsuccessfulJobSchedulingContexts map[string]*JobSchedulingContext
 	// Jobs evicted in this round.
 	EvictedJobsById map[string]bool
-}
-
-func GetSchedulingContextFromQueueSchedulingContext(qctx *QueueSchedulingContext) *SchedulingContext {
-	if qctx == nil {
-		return nil
-	}
-	return qctx.SchedulingContext
 }
 
 func (qctx *QueueSchedulingContext) String() string {
@@ -618,6 +680,8 @@ type JobSchedulingContext struct {
 	// Scheduling requirements of this job.
 	// We currently require that each job contains exactly one pod spec.
 	PodRequirements *schedulerobjects.PodRequirements
+	// Resource requirements in an efficient internaltypes.ResourceList
+	ResourceRequirements internaltypes.ResourceList
 	// Node selectors to consider in addition to those included with the PodRequirements.
 	// These are added as part of scheduling to further constrain where nodes are scheduled,
 	// e.g., to ensure evicted jobs are re-scheduled onto the same node.
@@ -636,8 +700,9 @@ type JobSchedulingContext struct {
 	// GangInfo holds all the information that is necessary to schedule a gang,
 	// such as the lower and upper bounds on its size.
 	GangInfo
-	// If set, indicates this job should be failed back to the client when the gang is scheduled.
-	ShouldFail bool
+	// This is the node the pod is assigned to.
+	// This is only set for evicted jobs and is set alongside adding an additionalNodeSelector for the node
+	AssignedNodeId string
 }
 
 func (jctx *JobSchedulingContext) String() string {
@@ -664,11 +729,7 @@ func (jctx *JobSchedulingContext) SchedulingKey() (schedulerobjects.SchedulingKe
 	if len(jctx.AdditionalNodeSelectors) != 0 || len(jctx.AdditionalTolerations) != 0 {
 		return schedulerobjects.EmptySchedulingKey, false
 	}
-	schedulingKey, ok := jctx.Job.SchedulingKey()
-	if !ok {
-		schedulingKey = jobdb.SchedulingKeyFromJob(defaultSchedulingKeyGenerator, jctx.Job)
-	}
-	return schedulingKey, true
+	return jctx.Job.SchedulingKey(), true
 }
 
 func (jctx *JobSchedulingContext) IsSuccessful() bool {
@@ -682,6 +743,17 @@ func (jctx *JobSchedulingContext) Fail(unschedulableReason string) {
 	}
 }
 
+func (jctx *JobSchedulingContext) GetAssignedNodeId() string {
+	return jctx.AssignedNodeId
+}
+
+func (jctx *JobSchedulingContext) SetAssignedNodeId(assignedNodeId string) {
+	if assignedNodeId != "" {
+		jctx.AssignedNodeId = assignedNodeId
+		jctx.AddNodeSelector(schedulerconfig.NodeIdLabel, assignedNodeId)
+	}
+}
+
 func (jctx *JobSchedulingContext) AddNodeSelector(key, value string) {
 	if jctx.AdditionalNodeSelectors == nil {
 		jctx.AdditionalNodeSelectors = map[string]string{key: value}
@@ -690,34 +762,23 @@ func (jctx *JobSchedulingContext) AddNodeSelector(key, value string) {
 	}
 }
 
-func (jctx *JobSchedulingContext) GetNodeSelector(key string) (string, bool) {
-	if value, ok := jctx.AdditionalNodeSelectors[key]; ok {
-		return value, true
-	} else if value, ok := jctx.PodRequirements.NodeSelector[key]; ok {
-		return value, true
-	}
-	return "", false
-}
-
 type GangInfo struct {
-	Id                 string
-	Cardinality        int
-	MinimumCardinality int
-	PriorityClassName  string
-	NodeUniformity     string
+	Id                string
+	Cardinality       int
+	PriorityClassName string
+	NodeUniformity    string
 }
 
 // EmptyGangInfo returns a GangInfo for a job that is not in a gang.
 func EmptyGangInfo(job interfaces.MinimalJob) GangInfo {
 	return GangInfo{
 		// An Id of "" indicates that this job is not in a gang; we set
-		// Cardinality and MinimumCardinality (as well as the other fields,
+		// Cardinality (as well as the other fields,
 		// which all make sense in this context) accordingly.
-		Id:                 "",
-		Cardinality:        1,
-		MinimumCardinality: 1,
-		PriorityClassName:  job.PriorityClassName(),
-		NodeUniformity:     job.Annotations()[configuration.GangNodeUniformityLabelAnnotation],
+		Id:                "",
+		Cardinality:       1,
+		PriorityClassName: job.PriorityClassName(),
+		NodeUniformity:    job.Annotations()[configuration.GangNodeUniformityLabelAnnotation],
 	}
 }
 
@@ -746,25 +807,8 @@ func GangInfoFromLegacySchedulerJob(job interfaces.MinimalJob) (GangInfo, error)
 		return gangInfo, errors.Errorf("gang cardinality %d is non-positive", gangCardinality)
 	}
 
-	gangMinimumCardinalityString, ok := annotations[configuration.GangMinimumCardinalityAnnotation]
-	if !ok {
-		// If it is not set, use gangCardinality as the minimum gang size.
-		gangMinimumCardinalityString = gangCardinalityString
-	}
-	gangMinimumCardinality, err := strconv.Atoi(gangMinimumCardinalityString)
-	if err != nil {
-		return gangInfo, errors.WithStack(err)
-	}
-	if gangMinimumCardinality <= 0 {
-		return gangInfo, errors.Errorf("gang minimum cardinality %d is non-positive", gangMinimumCardinality)
-	}
-	if gangMinimumCardinality > gangCardinality {
-		return gangInfo, errors.Errorf("gang minimum cardinality %d is greater than gang cardinality %d", gangMinimumCardinality, gangCardinality)
-	}
-
 	gangInfo.Id = gangId
 	gangInfo.Cardinality = gangCardinality
-	gangInfo.MinimumCardinality = gangMinimumCardinality
 	return gangInfo, nil
 }
 
@@ -782,12 +826,12 @@ func JobSchedulingContextFromJob(job *jobdb.Job) *JobSchedulingContext {
 		logrus.Errorf("failed to extract gang info from job %s: %s", job.Id(), err)
 	}
 	return &JobSchedulingContext{
-		Created:         time.Now(),
-		JobId:           job.Id(),
-		Job:             job,
-		PodRequirements: job.PodRequirements(),
-		GangInfo:        gangInfo,
-		ShouldFail:      false,
+		Created:              time.Now(),
+		JobId:                job.Id(),
+		Job:                  job,
+		PodRequirements:      job.PodRequirements(),
+		ResourceRequirements: job.EfficientResourceRequirements(),
+		GangInfo:             gangInfo,
 	}
 }
 

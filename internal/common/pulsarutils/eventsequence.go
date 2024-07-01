@@ -11,21 +11,22 @@ import (
 	"github.com/armadaproject/armada/internal/common/armadacontext"
 	"github.com/armadaproject/armada/internal/common/eventutil"
 	"github.com/armadaproject/armada/internal/common/requestid"
-	"github.com/armadaproject/armada/internal/common/schedulers"
 	"github.com/armadaproject/armada/pkg/armadaevents"
 )
 
 // CompactAndPublishSequences reduces the number of sequences to the smallest possible,
 // while respecting per-job set ordering and max Pulsar message size, and then publishes to Pulsar.
-func CompactAndPublishSequences(ctx *armadacontext.Context, sequences []*armadaevents.EventSequence, producer pulsar.Producer, maxMessageSizeInBytes uint, scheduler schedulers.Scheduler) error {
+func CompactAndPublishSequences(ctx *armadacontext.Context, sequences []*armadaevents.EventSequence, producer pulsar.Producer, maxEventsPerMessage int, maxMessageSizeInBytes uint) error {
 	// Reduce the number of sequences to send to the minimum possible,
-	// and then break up any sequences larger than maxMessageSizeInBytes.
 	sequences = eventutil.CompactEventSequences(sequences)
+	// Limit each sequence to have no more than maxEventsPerSequence events per sequence
+	sequences = eventutil.LimitSequencesEventMessageCount(sequences, maxEventsPerMessage)
+	// Limit each sequence to be no larger than maxMessageSizeInBytes bytes
 	sequences, err := eventutil.LimitSequencesByteSize(sequences, maxMessageSizeInBytes, true)
 	if err != nil {
 		return err
 	}
-	return PublishSequences(ctx, producer, sequences, scheduler)
+	return PublishSequences(ctx, producer, sequences)
 }
 
 // PublishSequences publishes several event sequences to Pulsar.
@@ -37,7 +38,7 @@ func CompactAndPublishSequences(ctx *armadacontext.Context, sequences []*armadae
 // and
 // eventutil.LimitSequencesByteSize(sequences, int(srv.MaxAllowedMessageSize))
 // before passing to this function.
-func PublishSequences(ctx *armadacontext.Context, producer pulsar.Producer, sequences []*armadaevents.EventSequence, scheduler schedulers.Scheduler) error {
+func PublishSequences(ctx *armadacontext.Context, producer pulsar.Producer, sequences []*armadaevents.EventSequence) error {
 	// Incoming gRPC requests are annotated with a unique id.
 	// Pass this id through the log by adding it to the Pulsar message properties.
 	requestId := requestid.FromContextOrMissing(ctx)
@@ -69,8 +70,7 @@ func PublishSequences(ctx *armadacontext.Context, producer pulsar.Producer, sequ
 			&pulsar.ProducerMessage{
 				Payload: payloads[i],
 				Properties: map[string]string{
-					requestid.MetadataKey:   requestId,
-					schedulers.PropertyName: schedulers.MsgPropertyFromScheduler(scheduler),
+					requestid.MetadataKey: requestId,
 				},
 				Key: sequences[i].JobSetName,
 			},
